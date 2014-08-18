@@ -1,14 +1,14 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"encoding/base64"
-	"bufio"
-	"bytes"
-	"io"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"strings"
@@ -95,7 +95,7 @@ func scoreStringAsEnglish(s string) float64 {
 func fill(b []byte, key []byte) {
 	keylen := len(key)
 	for i := 0; i < len(b); i++ {
-		b[i] = key[i % keylen]
+		b[i] = key[i%keylen]
 	}
 }
 
@@ -106,26 +106,25 @@ func make_fill(bytes []byte, length int) []byte {
 }
 
 func hamdist(x, y byte) int {
-  dist := 0
-  val := x ^ y
+	dist := 0
+	val := x ^ y
 
-  for val > 0 {
-    dist++ 
-    val &= val - 1;
-  }
- 
-  return dist
+	for val > 0 {
+		dist++
+		val &= val - 1
+	}
+
+	return dist
 }
 
 func hamdist_between(x, y []byte) int {
 	dist := 0
 
-	for i, _ := range(x) {
+	for i, _ := range x {
 		dist += hamdist(x[i], y[i])
 	}
 	return dist
 }
-
 
 func xorBuffers(a, b []byte) []byte {
 	res := make([]byte, len(a))
@@ -136,13 +135,13 @@ func xorBuffers(a, b []byte) []byte {
 }
 
 func guess_keysize(data []byte, min, max int) int {
-	bestGuess :=  1000000
+	bestGuess := 1000000
 	nBest := 100000.0
 
 	for guess := min; guess < max; guess++ {
-		blockPairsToCheck := int(math.Min(64, float64(len(data) / guess))) & 0xfffffffe
+		blockPairsToCheck := int(math.Min(64, float64(len(data)/guess))) & 0xfffffffe
 		dist := 0
-		for i := 0; i < blockPairsToCheck; i+=2 {
+		for i := 0; i < blockPairsToCheck; i += 2 {
 			s := i * guess
 			m := (i + 1) * guess
 			e := (i + 2) * guess
@@ -161,12 +160,12 @@ func transpose_by_block(data []byte, block_size int) [][]byte {
 	bytesPerBlock := (len(data) / block_size) + 1
 	result := make([][]byte, block_size)
 
-	for i, _ := range(result) {
+	for i, _ := range result {
 		result[i] = make([]byte, bytesPerBlock)
 	}
 
-	for i, _ := range(data) {
-		result[i % block_size][i / block_size] = data[i]
+	for i, _ := range data {
+		result[i%block_size][i/block_size] = data[i]
 	}
 
 	return result
@@ -194,7 +193,7 @@ func retrieve_key(cyphertext []byte, key_len int) []byte {
 	transposed_data := transpose_by_block(cyphertext, key_len)
 
 	key := make([]byte, key_len)
-	for i, d := range(transposed_data) {
+	for i, d := range transposed_data {
 		key[i] = retrieve_key_byte(d)
 	}
 	return key
@@ -211,35 +210,41 @@ func readBase64File(name string) []byte {
 	scanner := bufio.NewScanner(f)
 
 	for scanner.Scan() {
-		t,err := base64.StdEncoding.DecodeString(scanner.Text())
+		t, err := base64.StdEncoding.DecodeString(scanner.Text())
 		if err != nil {
 			panic(fmt.Sprintf("Error reading file line: %s", err.Error()))
 		}
 		buf.Write(t)
 	}
-	return buf.Bytes()	
+	return buf.Bytes()
 }
 
-type ECBReader struct {
-	data io.Reader
-	block cipher.Block
-}
+func num_matching_blocks(data []byte, blockSize int) int {
+	numBlocks := len(data) / blockSize
+	all_blocks := make([][]byte, numBlocks)
 
-func (e *ECBReader) Read(p []byte) (n int, err error) {
-	n, err = e.data.Read(p)
-
-	blocks := n / e.block.BlockSize()
-	for i := 0; i < blocks; i++ {
-		start := i * e.block.BlockSize()
-		end := (i + 1) * e.block.BlockSize()
-		e.block.Decrypt(p[start:end], p[start:end])
+	for j := 0; j < numBlocks; j++ {
+		s := j * blockSize
+		e := (j + 1) * blockSize
+		all_blocks[j] = data[s:e]
 	}
-	return
-}
 
-
-func NewECBDecrypter(block cipher.Block, ciphertext io.Reader) ECBReader {
-	return ECBReader{data: ciphertext, block: block}
+	numMatches := 0
+	for i := 0; i < numBlocks; i++ {
+		for j := i + 1; j < numBlocks; j++ {
+			same := true
+			for k := 0; k < blockSize; k++ {
+				if all_blocks[j][k] != all_blocks[i][k] {
+					same = false
+					break
+				}
+			}
+			if same {
+				numMatches++
+			}
+		}
+	}
+	return numMatches
 }
 
 func pkcs_7_pad(block []byte, desired_length int) []byte {
@@ -254,20 +259,26 @@ const (
 	Decrypt
 )
 
-type CBCReader struct {
-	data io.Reader
+const (
+	ECB = iota
+	CBC
+)
+
+type CryptoReader struct {
+	data  io.Reader
 	block cipher.Block
-	mode int
+	mode  int
+	kind  int
 }
 
-func (r *CBCReader) encrypt(p []byte) (int, error) {
+func (r *CryptoReader) encrypt(p []byte) (int, error) {
 	maxblocks := len(p) / r.block.BlockSize()
 
 	if maxblocks < 1 {
 		panic("need moar bytes")
 	}
 
-	buff := make([]byte, maxblocks * r.block.BlockSize())
+	buff := make([]byte, maxblocks*r.block.BlockSize())
 
 	n, err := r.data.Read(buff)
 
@@ -281,28 +292,30 @@ func (r *CBCReader) encrypt(p []byte) (int, error) {
 	prevBlock := make([]byte, r.block.BlockSize())
 
 	i := 0
-	for ;i < numBlocks - 1; i++ {
+	for ; i < numBlocks-1; i++ {
 		start := i * r.block.BlockSize()
 		end := (i + 1) * r.block.BlockSize()
 		r.block.Encrypt(p[start:end], xorBuffers(buff[start:end], prevBlock))
 
-		prevBlock = p[start:end]			
+		if r.kind == CBC {
+			prevBlock = p[start:end]
+		}
 	}
 
 	start := i * r.block.BlockSize()
-	lastBlock := pkcs_7_pad(buff[start:start + residual], r.block.BlockSize())
+	lastBlock := pkcs_7_pad(buff[start:start+residual], r.block.BlockSize())
 	r.block.Encrypt(p[start:], xorBuffers(lastBlock, prevBlock))
 
 	return n + residual, err
 }
 
-func (r *CBCReader) decrypt(p []byte) (n int, err error) {
+func (r *CryptoReader) decrypt(p []byte) (n int, err error) {
 	maxblocks := len(p) / r.block.BlockSize()
-	buff := make([]byte, maxblocks * r.block.BlockSize())
+	buff := make([]byte, maxblocks*r.block.BlockSize())
 
 	n, err = r.data.Read(buff)
 
-	if n % r.block.BlockSize() != 0 {
+	if n%r.block.BlockSize() != 0 {
 		panic("Bad block size")
 	}
 
@@ -317,38 +330,49 @@ func (r *CBCReader) decrypt(p []byte) (n int, err error) {
 
 		r.block.Decrypt(p[start:end], buff[start:end])
 		copy(p[start:end], xorBuffers(p[start:end], prevBlock))
-		prevBlock = buff[start:end]
+
+		if r.kind == CBC {
+			prevBlock = buff[start:end]
+		}
 	}
 	return
 }
 
-
-func (r *CBCReader) Read(p []byte) (n int, err error) {
+func (r *CryptoReader) Read(p []byte) (n int, err error) {
 	if r.mode == Encrypt {
 		return r.encrypt(p)
 	}
-	return	r.decrypt(p)
+	return r.decrypt(p)
 }
 
-func NewCBCEncrypter(key []byte, data io.Reader) CBCReader {
+func NewECBDecrypter(key []byte, ciphertext io.Reader) CryptoReader {
 	block, _ := aes.NewCipher(key)
-	return CBCReader{data: data, mode: Encrypt, block: block}
+	return CryptoReader{data: ciphertext, block: block, mode: Decrypt, kind: ECB}
 }
 
-func NewCBCDecrypter(key []byte, data io.Reader) CBCReader {
+func NewECBEncrypter(key []byte, ciphertext io.Reader) CryptoReader {
 	block, _ := aes.NewCipher(key)
-	return CBCReader{data: data, mode: Decrypt, block: block}
+	return CryptoReader{data: ciphertext, block: block, mode: Encrypt, kind: ECB}
 }
 
+func NewCBCEncrypter(key []byte, data io.Reader) CryptoReader {
+	block, _ := aes.NewCipher(key)
+	return CryptoReader{data: data, mode: Encrypt, block: block, kind: CBC}
+}
 
-func c10() {
+func NewCBCDecrypter(key []byte, data io.Reader) CryptoReader {
+	block, _ := aes.NewCipher(key)
+	return CryptoReader{data: data, mode: Decrypt, block: block, kind: CBC}
+}
+
+func main() {
 	ciphertext := bytes.NewBuffer(readBase64File("10.txt"))
 
 	reader := NewCBCDecrypter([]byte("YELLOW SUBMARINE"), ciphertext)
-	dst := make([]byte, 16 * 10000)
+	dst := make([]byte, 16*10000)
 
 	reader.Read(dst)
-	
+
 	fmt.Println(string(dst))
 }
 
@@ -365,41 +389,25 @@ func c8() {
 	lineNo := 0
 	for scanner.Scan() {
 		inp := hex2b(strings.TrimSpace(scanner.Text()))
-		all := make([][]byte, 10)
 
-		for j := 0; j < 10; j++ {
-			s := j * 16
-			e := (j + 1) * 16
-			all[j] = inp[s:e]
+		if numMatches := num_matching_blocks(inp, 16); numMatches > 0 {
+			fmt.Println(lineNo, numMatches)
 		}
 
-		for i := 0; i < 10; i++ {
-			for j := i + 1; j < 10; j++ {
-				same := true
-				for k := 0; k < 16; k++ {
-					if all[j][k] != all[i][k] {
-						same = false
-						break
-					}
-				}
-				if same {
-					fmt.Println(lineNo)
-				}
-			}
-		}
 		lineNo++
 	}
 }
 
 func c7() {
-	aesCipher,_ := aes.NewCipher([]byte("YELLOW SUBMARINE"))
 	ciphertext := bytes.NewBuffer(readBase64File("7.txt"))
 
-	reader := NewECBDecrypter(aesCipher, ciphertext)
-	dst := make([]byte, aesCipher.BlockSize() * 10000)
+	fmt.Println(num_matching_blocks(ciphertext.Bytes(), 16))
+
+	reader := NewECBDecrypter([]byte("YELLOW SUBMARINE"), ciphertext)
+	dst := make([]byte, 16*10000)
 
 	reader.Read(dst)
-	
+
 	fmt.Println(string(dst))
 }
 
@@ -433,7 +441,6 @@ func c5() {
 	fmt.Println(b2hex(c))
 }
 
-
 func c4() {
 
 	f, _ := os.Open("4.txt")
@@ -460,5 +467,5 @@ func c4() {
 		}
 		i++
 	}
-	fmt.Printf("%f: --%s--\n",bestScore, string(bestVal))
+	fmt.Printf("%f: --%s--\n", bestScore, string(bestVal))
 }
