@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/rand"
 	"os"
 	"strings"
 )
@@ -365,7 +366,58 @@ func NewCBCDecrypter(key []byte, data io.Reader) CryptoReader {
 	return CryptoReader{data: data, mode: Decrypt, block: block, kind: CBC}
 }
 
+func rand_bytes(length int) []byte {
+	result := make([]byte, length)
+
+	for i, _ := range result {
+		result[i] = byte(rand.Int() % 256)
+	}
+	return result
+}
+
+func rand_encryptor(key []byte, inp io.Reader) CryptoReader {
+	if rand.Int()%2 == 0 {
+		return NewCBCEncrypter(key, inp)
+	}
+	return NewECBEncrypter(key, inp)
+}
+
+func encryption_oracle(inp []byte) []byte {
+	key := rand_bytes(16)
+
+	padded := rand_bytes(rand.Int()%5 + 5)
+	padded = append(padded, inp...)
+	padded = append(padded, rand_bytes(rand.Int()%5+5)...)
+
+	encryptor := rand_encryptor(key, bytes.NewReader(padded))
+
+	result := make([]byte, len(padded))
+	encryptor.Read(result)
+	return result
+}
+
+func is_using_ecb(data []byte) bool {
+	blockPairsToCheck := 2
+	dist := 0
+	for i := 1; i < blockPairsToCheck; i += 2 {
+		s := i * 16
+		m := (i + 1) * 16
+		e := (i + 2) * 16
+		dist += hamdist_between(data[s:m], data[m:e])
+	}
+
+	return dist == 0
+}
+
 func main() {
+
+	for i := 0; i < 20; i++ {
+		enc := encryption_oracle(make_fill([]byte("a"), 512))
+		fmt.Println(is_using_ecb(enc))
+	}
+}
+
+func c10() {
 	ciphertext := bytes.NewBuffer(readBase64File("10.txt"))
 
 	reader := NewCBCDecrypter([]byte("YELLOW SUBMARINE"), ciphertext)
